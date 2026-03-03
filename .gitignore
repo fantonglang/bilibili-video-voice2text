@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Application directories
+audio/
+bilibili_video/
+outputs/
+
+# Cookies (contains sensitive login data - DO NOT COMMIT!)
+cookies.txt
+cookies.json
+*.cookies

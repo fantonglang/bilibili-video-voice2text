@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Directories that will be mounted as volumes
+bilibili_video/
+audio/
+outputs/
+
+# Environment (we mount it as read-only)
+# .env  # Uncomment if you want to exclude .env from build
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+Dockerfile
+.dockerignore
+bili-voice2text.sh

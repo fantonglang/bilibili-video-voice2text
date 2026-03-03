@@ -1,0 +1,33 @@
+# Bilibili Video Voice to Text - Docker Image (with China mirror)
+# Usage: docker build -f Dockerfile.mirror -t bili-voice2text .
+
+# Using mirror for China users (or other region-specific mirrors)
+FROM docker.mirrors.sjtug.sjtu.edu.cn/library/python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
+
+# Install Python dependencies (using Tsinghua mirror for pip)
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create necessary directories (will be mounted as volumes)
+RUN mkdir -p bilibili_video audio/conv audio/slice outputs
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Default command (can be overridden)
+ENTRYPOINT ["python", "main.py"]
+CMD ["--help"]
