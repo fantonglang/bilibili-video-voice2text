@@ -153,7 +153,8 @@ def get_video_info(bv_number: str) -> dict:
 
 def download_video(bv_number: str) -> str:
     """
-    Download Bilibili video using yt-dlp.
+    Download Bilibili video/audio using yt-dlp.
+    Downloads audio-only format when available to save bandwidth.
     
     Args:
         bv_number: BV number of the video (with or without 'BV' prefix)
@@ -170,12 +171,15 @@ def download_video(bv_number: str) -> str:
     
     ensure_video_folder()
     
-    print(f"[Downloader] Downloading video: {video_url}")
+    print(f"[Downloader] Downloading: {video_url}")
+    print(f"[Downloader] Preferring audio-only format...")
     
     try:
-        # Build command with base args
+        # Build command with base args - prefer audio-only format
+        # -f bestaudio/best selects best audio-only format, or falls back to best format
         cmd = [
             "yt-dlp",
+            "-f", "bestaudio/best",
             "-P", output_dir,
             "-o", "%(title)s.%(ext)s",
         ] + get_yt_dlp_base_args() + [video_url]
@@ -199,7 +203,7 @@ def download_video(bv_number: str) -> str:
             return ""
         
         print(result.stdout)
-        print(f"[Downloader] Video downloaded to: {output_dir}")
+        print(f"[Downloader] Downloaded to: {output_dir}")
         
         # Clean up XML files
         xml_files = glob.glob(os.path.join(output_dir, "*.xml"))
@@ -219,28 +223,35 @@ def download_video(bv_number: str) -> str:
 
 def find_video_file(bv_number: str) -> str:
     """
-    Find the downloaded video file path by BV number.
+    Find the downloaded video/audio file path by BV number.
     
     Args:
         bv_number: BV number (with or without 'BV' prefix)
         
     Returns:
-        Full path to the video file, or empty string if not found
+        Full path to the video/audio file, or empty string if not found
     """
     if not bv_number.startswith("BV"):
         bv_number = "BV" + bv_number
     
-    # Try direct .mp4 file first
-    direct_path = os.path.join(VIDEO_DIR, f"{bv_number}.mp4")
-    if os.path.exists(direct_path):
-        return direct_path
+    # Try direct files first
+    for ext in [".mp4", ".mpa", ".m4a", ".mp3", ".aac"]:
+        direct_path = os.path.join(VIDEO_DIR, f"{bv_number}{ext}")
+        if os.path.exists(direct_path):
+            return direct_path
     
     # Search in the subdirectory
     dir_path = os.path.join(VIDEO_DIR, bv_number)
     if os.path.isdir(dir_path):
-        for file in os.listdir(dir_path):
-            if file.endswith((".mp4", ".flv", ".mkv", ".avi")):
-                return os.path.join(dir_path, file)
+        # Prefer audio formats (.mpa, .m4a, .mp3, .aac) then video formats
+        preferred_exts = [".mpa", ".m4a", ".mp3", ".aac", ".mp4", ".flv", ".mkv", ".avi", ".webm"]
+        files = os.listdir(dir_path)
+        
+        # Sort by preferred extension order
+        for ext in preferred_exts:
+            for file in files:
+                if file.lower().endswith(ext):
+                    return os.path.join(dir_path, file)
     
     return ""
 

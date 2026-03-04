@@ -6,6 +6,7 @@ import os
 import re
 import requests
 import concurrent.futures
+import threading
 from typing import List, Tuple, Optional, Dict
 from config import (
     SILICON_FLOW_API_KEY,
@@ -17,6 +18,14 @@ from config import (
 
 # Maximum number of parallel threads
 MAX_WORKERS = 20
+
+# Maximum retry attempts for each slice
+MAX_RETRIES = 5
+
+
+class ASRAbortException(Exception):
+    """Exception raised when ASR fails after max retries and should abort all threads."""
+    pass
 
 
 def sanitize_filename(filename: str) -> str:
@@ -146,32 +155,59 @@ def transcribe_audio(audio_path: str) -> str:
             raise
 
 
-def transcribe_single_file(args: Tuple[int, str]) -> Tuple[int, str]:
+def transcribe_single_file(args: Tuple[int, str], abort_event: threading.Event) -> Tuple[int, str]:
     """
-    Transcribe a single audio file and return with its index.
+    Transcribe a single audio file with retry logic and return with its index.
     This function is designed to be used with ThreadPoolExecutor.
     
     Args:
         args: Tuple of (index, audio_file_path)
+        abort_event: Threading event to signal cancellation across all threads
         
     Returns:
         Tuple of (index, transcribed_text)
+        
+    Raises:
+        ASRAbortException: If max retries exceeded, triggering abort of all threads
     """
     index, audio_path = args
     audio_file = os.path.basename(audio_path)
     
     print(f"[ASR] Thread processing {index}: {audio_file}")
     
-    try:
-        text = transcribe_audio(audio_path)
-        print(f"[ASR] Thread {index} completed: {audio_file}")
-        if text:
-            preview = text[:80] + "..." if len(text) > 80 else text
-            print(f"       -> {preview}")
-        return (index, text)
-    except Exception as e:
-        print(f"[ASR] Thread {index} failed: {audio_file} - {str(e)}")
-        return (index, f"[Error transcribing {audio_file}: {str(e)}]")
+    # Check if abort has been signaled
+    if abort_event.is_set():
+        print(f"[ASR] Thread {index} aborted (abort signal received)")
+        return (index, f"[Aborted: {audio_file}]")
+    
+    # Retry loop
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            text = transcribe_audio(audio_path)
+            print(f"[ASR] Thread {index} completed: {audio_file} (attempt {attempt})")
+            if text:
+                preview = text[:80] + "..." if len(text) > 80 else text
+                print(f"       -> {preview}")
+            return (index, text)
+        except Exception as e:
+            if abort_event.is_set():
+                print(f"[ASR] Thread {index} aborted during retry")
+                return (index, f"[Aborted: {audio_file}]")
+            
+            if attempt < MAX_RETRIES:
+                print(f"[ASR] Thread {index} attempt {attempt} failed: {audio_file} - {str(e)}")
+                print(f"[ASR] Retrying... ({attempt}/{MAX_RETRIES})")
+            else:
+                # Max retries exceeded - signal abort and raise exception
+                error_msg = f"[Error transcribing {audio_file}: Max retries ({MAX_RETRIES}) exceeded - {str(e)}]"
+                print(f"[ASR] Thread {index} FAILED after {MAX_RETRIES} attempts: {audio_file}")
+                print(f"[ASR] {error_msg}")
+                print(f"[ASR] Signaling abort to all threads...")
+                abort_event.set()
+                raise ASRAbortException(f"Slice {index} ({audio_file}) failed after {MAX_RETRIES} retries")
+    
+    # This should never be reached
+    return (index, f"[Unexpected error: {audio_file}]")
 
 
 def transcribe_audio_folder_parallel(folder_name: str) -> str:
@@ -183,6 +219,9 @@ def transcribe_audio_folder_parallel(folder_name: str) -> str:
         
     Returns:
         Combined transcribed text from all slices (sorted by index)
+        
+    Raises:
+        ASRAbortException: If any slice fails after max retries
     """
     slice_dir = os.path.join(AUDIO_SLICE_DIR, folder_name)
     
@@ -198,7 +237,8 @@ def transcribe_audio_folder_parallel(folder_name: str) -> str:
     
     total_files = len(audio_files)
     print(f"[ASR] Found {total_files} audio slices to transcribe")
-    print(f"[ASR] Using {min(MAX_WORKERS, total_files)} parallel threads\n")
+    print(f"[ASR] Using {min(MAX_WORKERS, total_files)} parallel threads")
+    print(f"[ASR] Max retries per slice: {MAX_RETRIES}\n")
     
     # Prepare arguments with index for each file
     indexed_files = [
@@ -206,25 +246,42 @@ def transcribe_audio_folder_parallel(folder_name: str) -> str:
         for i, f in enumerate(audio_files)
     ]
     
+    # Shared abort event for signaling cancellation across threads
+    abort_event = threading.Event()
+    
     # Process in parallel using ThreadPoolExecutor
     results: List[Tuple[int, str]] = []
+    abort_error = None
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks and collect results
-        future_to_index = {
-            executor.submit(transcribe_single_file, args): args[0] 
-            for args in indexed_files
-        }
-        
-        # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_index):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                index = future_to_index[future]
-                print(f"[ASR] Unexpected error in thread {index}: {str(e)}")
-                results.append((index, f"[Unexpected error: {str(e)}]"))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks and collect results
+            future_to_index = {
+                executor.submit(transcribe_single_file, args, abort_event): args[0] 
+                for args in indexed_files
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_index):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except ASRAbortException as e:
+                    # Store the abort error and stop processing
+                    abort_error = e
+                    print(f"[ASR] Aborting all threads due to: {str(e)}")
+                    break
+                except Exception as e:
+                    index = future_to_index[future]
+                    print(f"[ASR] Unexpected error in thread {index}: {str(e)}")
+                    results.append((index, f"[Unexpected error: {str(e)}]"))
+    except Exception as e:
+        print(f"[ASR] Executor error: {str(e)}")
+        raise
+    
+    # If abort occurred, raise the exception
+    if abort_error:
+        raise abort_error
     
     # Sort results by index to maintain order
     results.sort(key=lambda x: x[0])
@@ -232,7 +289,7 @@ def transcribe_audio_folder_parallel(folder_name: str) -> str:
     # Join all texts in order
     all_text = [text for _, text in results]
     
-    print(f"\n[ASR] All {len(results)} threads completed")
+    print(f"\n[ASR] All {len(results)} threads completed successfully")
     
     return "\n".join(all_text)
 
@@ -266,6 +323,25 @@ def save_transcription(
     return output_path
 
 
+def remove_transcription_if_exists(video_info: Optional[Dict] = None) -> None:
+    """
+    Remove transcription file if it exists.
+    Used for cleanup when ASR fails.
+    
+    Args:
+        video_info: Optional video metadata for filename determination
+    """
+    filename = generate_output_filename(video_info)
+    output_path = os.path.join(OUTPUT_DIR, filename)
+    
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+            print(f"[ASR] Removed partial output file: {output_path}")
+        except Exception as e:
+            print(f"[ASR] Warning: Failed to remove output file: {str(e)}")
+
+
 def process_transcription(
     folder_name: str,
     video_info: Optional[Dict] = None
@@ -279,20 +355,32 @@ def process_transcription(
         
     Returns:
         Path to the saved transcription file
+        
+    Raises:
+        ASRAbortException: If any slice fails after max retries
     """
     print(f"\n{'='*60}")
     print(f"[ASR] Starting parallel transcription for: {folder_name}")
     print(f"{'='*60}\n")
     
-    text = transcribe_audio_folder_parallel(folder_name)
-    output_path = save_transcription(text, video_info=video_info)
-    
-    print(f"\n{'='*60}")
-    print(f"[ASR] Parallel transcription completed!")
-    print(f"[ASR] Output: {output_path}")
-    print(f"{'='*60}")
-    
-    return output_path
+    try:
+        text = transcribe_audio_folder_parallel(folder_name)
+        output_path = save_transcription(text, video_info=video_info)
+        
+        print(f"\n{'='*60}")
+        print(f"[ASR] Parallel transcription completed!")
+        print(f"[ASR] Output: {output_path}")
+        print(f"{'='*60}")
+        
+        return output_path
+    except ASRAbortException as e:
+        # Clean up partial output if exists
+        print(f"\n{'='*60}")
+        print(f"[ASR] Transcription FAILED: {str(e)}")
+        print(f"[ASR] Cleaning up partial output...")
+        remove_transcription_if_exists(video_info)
+        print(f"{'='*60}\n")
+        raise
 
 
 if __name__ == "__main__":
@@ -301,5 +389,9 @@ if __name__ == "__main__":
     try:
         result_path = process_transcription(test_folder)
         print(f"\nTranscription saved to: {result_path}")
+    except ASRAbortException as e:
+        print(f"\nTranscription aborted: {str(e)}")
+        exit(1)
     except Exception as e:
         print(f"Error: {str(e)}")
+        exit(1)

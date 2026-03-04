@@ -13,11 +13,13 @@ Usage:
 import os
 import sys
 import argparse
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Dict, Tuple
 from downloader import download_video, find_video_file, get_video_info
 from audio_processor import process_audio
 from silicon_flow_asr import process_transcription
 from cleanup import cleanup_audio_files
+from config import OUTPUT_DIR
 
 
 def display_video_info(info: dict):
@@ -35,7 +37,7 @@ def display_video_info(info: dict):
     print("=" * 60)
 
 
-def process_single_video(bv_input: str, index: int = None, total: int = None) -> bool:
+def process_single_video(bv_input: str, index: int = None, total: int = None) -> Tuple[bool, Optional[Dict]]:
     """
     Process a single video from download to transcription.
     
@@ -45,7 +47,7 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
         total: Optional total count for batch processing display
         
     Returns:
-        True if successful, False otherwise
+        Tuple of (success: bool, video_info: dict or None)
     """
     # Display header for this video
     prefix = ""
@@ -66,6 +68,9 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
         display_video_info(video_info)
     else:
         print(f"Warning: Could not retrieve video information for {bv_input}")
+        # Create minimal info with just BV code
+        bv_normalized = bv_input if bv_input.startswith("BV") else f"BV{bv_input}"
+        video_info = {"bv_number": bv_normalized, "title": "Unknown (failed to fetch info)"}
     
     # Step 2: Download video
     print("\n" + "-" * 60)
@@ -76,7 +81,7 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
     
     if not bv_number:
         print(f"Error: Failed to download video {bv_input}!")
-        return False
+        return False, video_info
     
     # Step 3: Find the downloaded video file
     print("\n" + "-" * 60)
@@ -87,7 +92,7 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
     
     if not video_path:
         print(f"Error: Video file not found for {bv_number}")
-        return False
+        return False, video_info
     
     print(f"Video file found: {video_path}")
     
@@ -103,7 +108,7 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
         print(f"  - Slice directory: {slice_dir}")
     except Exception as e:
         print(f"Error: Failed to process audio: {str(e)}")
-        return False
+        return False, video_info
     
     # Step 5: Transcribe audio
     print("\n" + "-" * 60)
@@ -114,7 +119,7 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
         output_path = process_transcription(folder_name, video_info=video_info)
     except Exception as e:
         print(f"Error: Failed to transcribe audio: {str(e)}")
-        return False
+        return False, video_info
     
     # Step 6: Cleanup temporary audio files
     cleanup_audio_files(folder_name)
@@ -127,7 +132,62 @@ def process_single_video(bv_input: str, index: int = None, total: int = None) ->
         print(f"  Uploader: {video_info['uploader']}")
     print("=" * 60)
     
-    return True
+    return True, video_info
+
+
+def write_summary(results: Dict[str, List[Dict]]) -> str:
+    """
+    Write processing summary to a file.
+    
+    Args:
+        results: Dictionary with 'success' and 'failed' lists, each containing video_info dicts
+        
+    Returns:
+        Path to the summary file
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    summary_path = os.path.join(OUTPUT_DIR, "summary.txt")
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("=" * 70 + "\n")
+        f.write("Bilibili Video Voice to Text - Processing Summary\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Generated at: {timestamp}\n")
+        f.write(f"\n")
+        f.write(f"Total videos processed: {len(results['success']) + len(results['failed'])}\n")
+        f.write(f"Successful: {len(results['success'])}\n")
+        f.write(f"Failed: {len(results['failed'])}\n")
+        f.write("\n")
+        
+        # Successful items
+        if results["success"]:
+            f.write("=" * 70 + "\n")
+            f.write("SUCCESSFUL (✓)\n")
+            f.write("=" * 70 + "\n\n")
+            for i, info in enumerate(results["success"], 1):
+                bv = info.get('bv_number', 'Unknown')
+                title = info.get('title', 'Unknown')
+                f.write(f"{i}. [{bv}] {title}\n")
+            f.write("\n")
+        
+        # Failed items
+        if results["failed"]:
+            f.write("=" * 70 + "\n")
+            f.write("FAILED (✗)\n")
+            f.write("=" * 70 + "\n\n")
+            for i, info in enumerate(results["failed"], 1):
+                bv = info.get('bv_number', 'Unknown')
+                title = info.get('title', 'Unknown')
+                f.write(f"{i}. [{bv}] {title}\n")
+            f.write("\n")
+        
+        f.write("=" * 70 + "\n")
+        f.write("End of Summary\n")
+        f.write("=" * 70 + "\n")
+    
+    return summary_path
 
 
 def interactive_mode():
@@ -144,7 +204,14 @@ def interactive_mode():
         sys.exit(1)
     
     # Process the single video
-    success = process_single_video(bv_input)
+    success, video_info = process_single_video(bv_input)
+    
+    # Write summary
+    results = {
+        "success": [video_info] if success else [],
+        "failed": [] if success else [video_info]
+    }
+    summary_path = write_summary(results)
     
     # Final summary
     print("\n" + "=" * 60)
@@ -152,6 +219,7 @@ def interactive_mode():
         print("All done! Transcription saved successfully.")
     else:
         print("Processing failed!")
+    print(f"\nSummary saved to: {summary_path}")
     print("=" * 60)
     
     return success
@@ -175,18 +243,21 @@ def batch_mode(bv_codes: List[str]):
     }
     
     for i, bv_code in enumerate(bv_codes, 1):
-        success = process_single_video(bv_code, index=i, total=len(bv_codes))
+        success, video_info = process_single_video(bv_code, index=i, total=len(bv_codes))
         
         if success:
-            results["success"].append(bv_code)
+            results["success"].append(video_info)
         else:
-            results["failed"].append(bv_code)
+            results["failed"].append(video_info)
         
         # Add separator between videos (except after the last one)
         if i < len(bv_codes):
             print("\n" + "#" * 70)
             print(f"Moving to next video... ({i}/{len(bv_codes)} completed)")
             print("#" * 70)
+    
+    # Write summary file
+    summary_path = write_summary(results)
     
     # Final summary
     print("\n" + "=" * 70)
@@ -198,14 +269,19 @@ def batch_mode(bv_codes: List[str]):
     
     if results["success"]:
         print(f"\nSuccessful videos:")
-        for bv in results["success"]:
-            print(f"  ✓ {bv}")
+        for info in results["success"]:
+            bv = info.get('bv_number', 'Unknown')
+            title = info.get('title', 'Unknown')
+            print(f"  ✓ [{bv}] {title}")
     
     if results["failed"]:
         print(f"\nFailed videos:")
-        for bv in results["failed"]:
-            print(f"  ✗ {bv}")
+        for info in results["failed"]:
+            bv = info.get('bv_number', 'Unknown')
+            title = info.get('title', 'Unknown')
+            print(f"  ✗ [{bv}] {title}")
     
+    print(f"\nSummary saved to: {summary_path}")
     print("=" * 70)
     
     return len(results["failed"]) == 0

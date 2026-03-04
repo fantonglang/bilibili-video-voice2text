@@ -132,12 +132,26 @@ def generate_unique_folder_name() -> str:
     return f"{timestamp}_{unique_suffix}"
 
 
-def process_audio(video_path: str) -> tuple[str, str]:
+def is_audio_file(file_path: str) -> bool:
     """
-    Process video: extract audio and slice it.
+    Check if the file is an audio file based on extension.
     
     Args:
-        video_path: Path to the video file
+        file_path: Path to the file
+        
+    Returns:
+        True if it's an audio file, False otherwise
+    """
+    audio_extensions = ('.mpa', '.m4a', '.mp3', '.aac', '.wav', '.flac', '.ogg', '.opus', '.wma')
+    return file_path.lower().endswith(audio_extensions)
+
+
+def process_audio(video_path: str) -> tuple[str, str]:
+    """
+    Process video/audio: extract audio if needed and slice it.
+    
+    Args:
+        video_path: Path to the video or audio file
         
     Returns:
         Tuple of (folder_name, slice_directory_path)
@@ -145,11 +159,38 @@ def process_audio(video_path: str) -> tuple[str, str]:
     # Generate unique folder name that won't collide with concurrent runs
     folder_name = generate_unique_folder_name()
     
-    # Extract audio
-    audio_path = extract_audio_from_video(video_path, target_name=folder_name)
+    # Check if it's already an audio file (e.g., .mpa downloaded by yt-dlp)
+    if is_audio_file(video_path):
+        print(f"[AudioProcessor] Input is already an audio file: {os.path.basename(video_path)}")
+        print(f"[AudioProcessor] Skipping audio extraction")
+        
+        # Create output directory for the audio file
+        os.makedirs(AUDIO_CONV_DIR, exist_ok=True)
+        
+        # Copy/rename the audio file to our working directory
+        audio_filename = f"{folder_name}.mp3"
+        audio_path = os.path.join(AUDIO_CONV_DIR, audio_filename)
+        
+        # Use pydub to load and re-save as mp3 (ensures compatibility)
+        try:
+            audio = AudioSegment.from_file(video_path)
+            audio.export(audio_path, format="mp3")
+            print(f"[AudioProcessor] Audio converted to: {audio_path}")
+        except Exception as e:
+            # If conversion fails, try direct copy
+            print(f"[AudioProcessor] Conversion failed ({str(e)}), attempting direct copy...")
+            import shutil
+            # Determine extension from source
+            ext = os.path.splitext(video_path)[1]
+            audio_path = os.path.join(AUDIO_CONV_DIR, f"{folder_name}{ext}")
+            shutil.copy2(video_path, audio_path)
+            print(f"[AudioProcessor] Audio copied to: {audio_path}")
+    else:
+        # Extract audio from video
+        audio_path = extract_audio_from_video(video_path, target_name=folder_name)
     
     if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Extracted audio file not found: {audio_path}")
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
     
     # Slice audio
     slice_dir = slice_audio(audio_path, folder_name)
